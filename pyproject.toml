@@ -1,0 +1,23 @@
+[project]
+name = "budget-baker"
+version = "0.1.0"
+description = "Privacy-first transaction categorization web app"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "streamlit>=1.31.0",
+    "polars>=1.0.0",
+    "pandas>=2.0.0",
+    "plotly>=5.18.0",
+    "kaleido>=0.2.1",
+    "anthropic>=0.18.0",
+    "python-dateutil>=2.8.2",
+    "chardet>=5.2.0",
+    "reportlab>=4.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-timeout>=2.4.0",
+]
