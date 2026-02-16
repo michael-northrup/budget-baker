@@ -12,30 +12,51 @@ from modules.progress_indicator import render_progress_indicator, render_privacy
 
 
 def _apply_results_edits():
-    """Apply pending category edits from the Results editor to categorized_df."""
+    """Apply pending category edits from the Results editor to categorized_df.
+
+    Bug fix: edits are keyed by row_id (unique per transaction) instead of
+    description.  Previously, description-based matching would modify EVERY
+    transaction sharing the same description text, corrupting totals when
+    only one row was intended to change.
+    """
     pending = st.session_state.get('results_pending_edits', {})
     if not pending or 'categorized_df' not in st.session_state:
         return
 
     updated_df = st.session_state.categorized_df.clone()
 
-    for description, new_category in pending.items():
-        updated_df = updated_df.with_columns(
-            pl.when(pl.col('description') == description)
-              .then(pl.lit(new_category))
-              .otherwise(pl.col('category'))
-              .alias('category')
-        )
+    # Build a single Polars expression that maps each edited row_id to its
+    # new category.  This targets only the specific rows the user edited.
+    edited_ids = list(pending.keys())
+    edited_cats = [pending[rid] for rid in edited_ids]
+    edit_map_df = pl.DataFrame({
+        'row_id': [int(rid) for rid in edited_ids],
+        'new_category': edited_cats,
+    }).cast({'row_id': pl.UInt32})
 
-    # Update type based on new category
-    updated_df = updated_df.with_columns([
-        pl.when(pl.col('amount') > 0)
-          .then(pl.lit('Income'))
-          .when(pl.col('category') == 'Transfers')
-          .then(pl.lit('Transfer'))
-          .otherwise(pl.lit('Expense'))
+    updated_df = updated_df.join(edit_map_df, on='row_id', how='left')
+    updated_df = updated_df.with_columns(
+        pl.when(pl.col('new_category').is_not_null())
+          .then(pl.col('new_category'))
+          .otherwise(pl.col('category'))
+          .alias('category')
+    ).drop('new_category')
+
+    # Update type ONLY for the edited rows.  Leave all other rows' types
+    # untouched to avoid the data corruption bug where a global reassignment
+    # changed types for unrelated transactions.
+    updated_df = updated_df.with_columns(
+        pl.when(pl.col('row_id').is_in([int(rid) for rid in edited_ids]))
+          .then(
+              pl.when(pl.col('amount') > 0)
+                .then(pl.lit('Income'))
+                .when(pl.col('category') == 'Transfers')
+                .then(pl.lit('Transfer'))
+                .otherwise(pl.lit('Expense'))
+          )
+          .otherwise(pl.col('type'))
           .alias('type')
-    ])
+    )
 
     st.session_state.categorized_df = updated_df
     # Merge into persistent edit history
@@ -123,7 +144,27 @@ def main():
 
     with col3:
         net = income + expenses
-        st.metric("Net", f"${net:,.2f}", delta=f"${net:,.2f}")
+        # FIX for Issue 3 (Net Metric Display):
+        # Previously the delta just repeated the net value with no meaningful
+        # comparison, always showing a green up-arrow regardless of sign.
+        # Now we use delta_color="normal" so Streamlit shows:
+        #   - Green up-arrow for positive net (income > expenses)
+        #   - Red down-arrow for negative net (expenses > income)
+        # The delta text says "positive" or "negative" to label the meaning.
+        if net >= 0:
+            st.metric(
+                "Net",
+                f"${net:,.2f}",
+                delta="positive",
+                delta_color="normal",
+            )
+        else:
+            st.metric(
+                "Net",
+                f"${net:,.2f}",
+                delta="negative",
+                delta_color="normal",
+            )
 
     with col4:
         uncategorized = len(filtered_df.filter(pl.col('category') == 'Uncategorized'))
@@ -248,7 +289,7 @@ def main():
     if ('results_edit_snapshot' not in st.session_state
             or prev_filter_key != snapshot_filter_key):
         snapshot = display_df.select([
-            'date', 'description', 'amount', 'category', 'confidence', 'type'
+            'row_id', 'date', 'description', 'amount', 'category', 'confidence', 'type'
         ]).to_pandas()
         snapshot['date'] = pd.to_datetime(snapshot['date']).dt.strftime('%m/%d/%Y')
         snapshot['confidence'] = snapshot['confidence'].apply(lambda x: f"{x:.0%}")
@@ -257,20 +298,19 @@ def main():
         # Clear pending edits when filter changes
         st.session_state.results_pending_edits = {}
 
+    # FIX for Issue 1 (same pattern as Bake page):
+    # Always pass the ORIGINAL snapshot as input to data_editor.
+    # Do NOT pre-apply pending edits into the input DataFrame.
+    # This keeps the input stable across reruns and prevents the widget
+    # from resetting its internal edit-tracking state, which was causing
+    # the "first edit on a new row doesn't register" bug.
     edit_df = st.session_state.results_edit_snapshot.copy()
 
-    # Pre-apply pending edits into the display so user sees their changes
-    pending = st.session_state.get('results_pending_edits', {})
-    if pending:
-        for idx in edit_df.index:
-            desc = edit_df.at[idx, 'description']
-            if desc in pending:
-                edit_df.at[idx, 'category'] = pending[desc]
-
-    # Editable dataframe
+    # Editable dataframe -- input is always the original snapshot
     edited_df = st.data_editor(
         edit_df,
         column_config={
+            "row_id": None,  # Hide the internal row_id column
             "date": st.column_config.TextColumn("Date", disabled=True, width="small"),
             "description": st.column_config.TextColumn("Description", disabled=True, width="large"),
             "amount": st.column_config.NumberColumn(
@@ -298,21 +338,23 @@ def main():
     if uncategorized > 0:
         st.caption("💡 Tip: Check 'Show only uncategorized' to focus on unclear items")
 
-    # Detect edits by comparing each row using integer index against the
-    # original snapshot (not the pre-applied pending version).
+    # Detect edits by comparing the widget output against the original
+    # snapshot.  Since the input is always the same stable snapshot, the
+    # widget preserves ALL user edits (across multiple rows) without
+    # resetting between reruns.
     original_snapshot = st.session_state.results_edit_snapshot
-    new_pending = dict(pending)
+    new_pending = {}
 
     for idx in edited_df.index:
         new_cat = edited_df.at[idx, 'category']
         original_cat = original_snapshot.at[idx, 'category']
-        desc = original_snapshot.at[idx, 'description']
+        row_id = original_snapshot.at[idx, 'row_id']
 
         if new_cat != original_cat:
-            new_pending[desc] = new_cat
-        else:
-            # If user reverted back to original, remove from pending
-            new_pending.pop(desc, None)
+            # Key by row_id (unique per transaction) instead of
+            # description to avoid modifying unrelated transactions
+            # that happen to share the same description text.
+            new_pending[int(row_id)] = new_cat
 
     st.session_state.results_pending_edits = new_pending
 

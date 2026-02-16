@@ -230,17 +230,15 @@ def export_to_pdf(
     story.append(Paragraph("(Showing first 50 transactions)", styles['Italic']))
     story.append(Spacer(1, 0.2*inch))
 
-    # Sample transactions
+    # Sample transactions -- use named rows for robustness regardless of column order
     sample_df = df.head(50)
     trans_data = [['Date', 'Description', 'Amount', 'Category']]
 
-    for row in sample_df.iter_rows():
-        date_val = row[0].strftime('%m/%d/%Y') if row[0] else ''
-        desc_val = str(row[1])[:40] + '...' if len(str(row[1])) > 40 else str(row[1])
-        amount_val = f"${row[2]:,.2f}"
-        # Find category column index
-        category_idx = df.columns.index('category')
-        category_val = str(row[category_idx])
+    for row in sample_df.iter_rows(named=True):
+        date_val = row['date'].strftime('%m/%d/%Y') if row['date'] else ''
+        desc_val = str(row['description'])[:40] + '...' if len(str(row['description'])) > 40 else str(row['description'])
+        amount_val = f"${row['amount']:,.2f}"
+        category_val = str(row['category'])
 
         trans_data.append([date_val, desc_val, amount_val, category_val])
 

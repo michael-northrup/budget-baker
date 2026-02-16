@@ -627,6 +627,10 @@ def categorize_transactions(df: pl.DataFrame, use_ai: bool = False, api_key: Opt
                 # Drop temporary columns
                 result_df = result_df.drop(['merchant', 'ai_category'])
 
+    # Add a unique row identifier so edits can target specific transactions
+    # (descriptions are not unique -- multiple transactions can share the same one)
+    result_df = result_df.with_row_index('row_id')
+
     return result_df
 
 

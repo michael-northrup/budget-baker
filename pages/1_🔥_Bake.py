@@ -11,30 +11,51 @@ from modules.progress_indicator import render_progress_indicator, render_privacy
 
 
 def _apply_pending_edits():
-    """Apply pending category edits to categorized_df and clear pending state."""
+    """Apply pending category edits to categorized_df and clear pending state.
+
+    Bug fix: edits are keyed by row_id (unique per transaction) instead of
+    description.  Previously, description-based matching would modify EVERY
+    transaction sharing the same description text, corrupting totals when
+    only one row was intended to change.
+    """
     pending = st.session_state.get('bake_pending_edits', {})
     if not pending or 'categorized_df' not in st.session_state:
         return
 
     updated_df = st.session_state.categorized_df.clone()
 
-    for description, new_category in pending.items():
-        updated_df = updated_df.with_columns(
-            pl.when(pl.col('description') == description)
-              .then(pl.lit(new_category))
-              .otherwise(pl.col('category'))
-              .alias('category')
-        )
+    # Build a single Polars expression that maps each edited row_id to its
+    # new category.  This targets only the specific rows the user edited.
+    edited_ids = list(pending.keys())
+    edited_cats = [pending[rid] for rid in edited_ids]
+    edit_map_df = pl.DataFrame({
+        'row_id': [int(rid) for rid in edited_ids],
+        'new_category': edited_cats,
+    }).cast({'row_id': pl.UInt32})
 
-    # Update type based on new category
-    updated_df = updated_df.with_columns([
-        pl.when(pl.col('amount') > 0)
-          .then(pl.lit('Income'))
-          .when(pl.col('category') == 'Transfers')
-          .then(pl.lit('Transfer'))
-          .otherwise(pl.lit('Expense'))
+    updated_df = updated_df.join(edit_map_df, on='row_id', how='left')
+    updated_df = updated_df.with_columns(
+        pl.when(pl.col('new_category').is_not_null())
+          .then(pl.col('new_category'))
+          .otherwise(pl.col('category'))
+          .alias('category')
+    ).drop('new_category')
+
+    # Update type ONLY for the edited rows.  Leave all other rows' types
+    # untouched to avoid the data corruption bug where a global reassignment
+    # changed types for unrelated transactions.
+    updated_df = updated_df.with_columns(
+        pl.when(pl.col('row_id').is_in([int(rid) for rid in edited_ids]))
+          .then(
+              pl.when(pl.col('amount') > 0)
+                .then(pl.lit('Income'))
+                .when(pl.col('category') == 'Transfers')
+                .then(pl.lit('Transfer'))
+                .otherwise(pl.lit('Expense'))
+          )
+          .otherwise(pl.col('type'))
           .alias('type')
-    ])
+    )
 
     st.session_state.categorized_df = updated_df
     # Merge pending edits into the persistent edit history
@@ -185,27 +206,34 @@ ANTHROPIC_API_KEY = "sk-ant-api03-..."
             if 'bake_uncat_snapshot' not in st.session_state:
                 uncat_pl = categorized_df.filter(pl.col('category') == 'Uncategorized')
                 snapshot = uncat_pl.select([
-                    'date', 'description', 'amount', 'category', 'confidence'
+                    'row_id', 'date', 'description', 'amount', 'category', 'confidence'
                 ]).to_pandas()
                 snapshot['date'] = pd.to_datetime(snapshot['date']).dt.strftime('%m/%d/%Y')
                 snapshot['confidence'] = snapshot['confidence'].apply(lambda x: f"{x:.0%}")
                 st.session_state.bake_uncat_snapshot = snapshot
 
+            # FIX for Issue 1 (Category Edit Delay Bug):
+            # Always pass the ORIGINAL snapshot as input to data_editor, never
+            # pre-apply pending edits into the input DataFrame.
+            #
+            # When the input DataFrame to st.data_editor changes between reruns,
+            # Streamlit resets the widget's internal edit-tracking state.  This
+            # caused the "first edit doesn't stick" bug: editing row 0 updated
+            # the input data (via pre-apply), which reset the widget state on
+            # the next rerun, so the user's first click on row 1 was swallowed
+            # by the state reset and only the second attempt registered.
+            #
+            # By keeping the input stable (always the original snapshot), the
+            # widget preserves its internal state across reruns.  All edits
+            # (including the previously pending ones) are tracked by the widget
+            # itself and detected via comparison against the snapshot.
             edit_df = st.session_state.bake_uncat_snapshot.copy()
 
-            # Pre-apply any pending (not yet committed) edits so the user
-            # sees their previous selections reflected in the editor.
-            pending = st.session_state.get('bake_pending_edits', {})
-            if pending:
-                for idx in edit_df.index:
-                    desc = edit_df.at[idx, 'description']
-                    if desc in pending:
-                        edit_df.at[idx, 'category'] = pending[desc]
-
-            # Editable dataframe
+            # Editable dataframe -- input is always the original snapshot
             edited_df = st.data_editor(
                 edit_df,
                 column_config={
+                    "row_id": None,  # Hide the internal row_id column
                     "date": st.column_config.TextColumn("Date", disabled=True, width="small"),
                     "description": st.column_config.TextColumn("Description", disabled=True, width="large"),
                     "amount": st.column_config.NumberColumn(
@@ -229,24 +257,23 @@ ANTHROPIC_API_KEY = "sk-ant-api03-..."
                 key="bake_transaction_editor"
             )
 
-            # Detect edits by comparing each row using the integer index.
-            # This avoids the old description-based matching that broke when
-            # multiple transactions shared the same description text.
+            # Detect edits by comparing the widget output against the original
+            # snapshot.  Since the input is always the same stable snapshot, the
+            # widget's internal state preserves ALL user edits (across multiple
+            # rows) without resetting.
             original_snapshot = st.session_state.bake_uncat_snapshot
-            has_changes = False
-            new_pending = dict(pending)  # start from current pending
+            new_pending = {}
 
             for idx in edited_df.index:
                 new_cat = edited_df.at[idx, 'category']
                 original_cat = original_snapshot.at[idx, 'category']
-                desc = original_snapshot.at[idx, 'description']
+                row_id = original_snapshot.at[idx, 'row_id']
 
                 if new_cat != original_cat:
-                    new_pending[desc] = new_cat
-                    has_changes = True
-                else:
-                    # If user reverted a pending edit back to original, remove it
-                    new_pending.pop(desc, None)
+                    # Key by row_id (unique per transaction) instead of
+                    # description to avoid modifying unrelated transactions
+                    # that happen to share the same description text.
+                    new_pending[int(row_id)] = new_cat
 
             st.session_state.bake_pending_edits = new_pending
 
