@@ -665,6 +665,16 @@ def categorize_transactions(df: pl.DataFrame, use_ai: bool = False) -> pl.DataFr
                 # Drop temporary columns
                 result_df = result_df.drop(['merchant', 'ai_category'])
 
+    # Enforce category/type consistency — AI may have overwritten category after type was set
+    result_df = result_df.with_columns([
+        pl.when(pl.col('type') == 'Income')
+          .then(pl.lit('Income'))
+          .when(pl.col('type') == 'Transfer')
+          .then(pl.lit('Transfers'))
+          .otherwise(pl.col('category'))
+          .alias('category')
+    ])
+
     # Add a unique row identifier so edits can target specific transactions
     # (descriptions are not unique -- multiple transactions can share the same one)
     result_df = result_df.with_row_index('row_id')
