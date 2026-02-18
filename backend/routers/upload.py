@@ -30,7 +30,7 @@ async def upload_csv(files: List[UploadFile] = File(...)):
 
     # Combine and deduplicate
     if len(all_dfs) > 1:
-        combined = pl.concat(all_dfs, how="diagonal")
+        combined = pl.concat(all_dfs, how="vertical_relaxed")
         combined = combined.unique(subset=["date", "description", "amount"])
     else:
         combined = all_dfs[0]

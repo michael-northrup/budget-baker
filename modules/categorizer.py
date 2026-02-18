@@ -538,6 +538,12 @@ def categorize_with_ai(merchants: List[str]) -> Dict[str, str]:
 
         response_text = _call_serving_endpoint(gateway_url, token, endpoint_name, merchants)
 
+        # Strip markdown code blocks that Llama often wraps around JSON
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+
         categorization = json.loads(response_text)
 
         # Validate categories
