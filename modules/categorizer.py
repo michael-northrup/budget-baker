@@ -502,17 +502,7 @@ def _call_serving_endpoint(gateway_url: str, token: str, endpoint_name: str, mer
 
     resp = _requests.post(url, headers=headers, json=payload, timeout=60)
 
-    if not resp.ok:
-        raise ValueError(f"Gateway error {resp.status_code}: {resp.text[:500]}")
-
-    data = resp.json()
-    logger.debug(f"Gateway response keys: {list(data.keys())}")
-
-    # Extract text from Responses API format
-    try:
-        return data["output"][0]["content"][0]["text"]
-    except (KeyError, IndexError):
-        raise ValueError(f"Unexpected response structure: {str(data)[:500]}")
+    raise ValueError(f"Gateway HTTP {resp.status_code} | body: {repr(resp.text[:800])}")
 
 
 def categorize_with_ai(merchants: List[str]) -> Dict[str, str]:
