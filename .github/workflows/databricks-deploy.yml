@@ -144,7 +144,6 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod'
     environment:
       name: production
-      url: https://${{ secrets.DATABRICKS_HOST }}
 
     steps:
       - name: Checkout code
