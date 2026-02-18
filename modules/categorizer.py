@@ -390,6 +390,12 @@ def categorize_by_keywords(description: str, amount: float) -> Tuple[str, float]
 
 SYSTEM_PROMPT = """You are an expert at categorizing financial transactions. You will receive merchant names and must assign each to exactly one category.
 
+CRITICAL RULES:
+- NEVER use "Groceries" as a default or fallback for unknown merchants. Groceries is ONLY for actual grocery stores (Whole Foods, Trader Joe's, Safeway, Kroger, Walmart Grocery, etc.).
+- If you are unsure of a merchant's category, use "Uncategorized" — do NOT guess.
+- Payroll, deposits, salary, and direct deposits from employers are "Income".
+- Government payments (state/federal payroll, tax refunds, benefits) are "Income".
+
 IMPORTANT CONTEXT:
 Many merchants appear through payment processors. Look past the processor to identify the actual business:
 - "SQ *" = Square (payment processor - look at what follows)
@@ -485,7 +491,10 @@ def _call_serving_endpoint(gateway_url: str, token: str, endpoint_name: str, mer
         '- "shell oil 57432658901" -> Gas/Transportation\n'
         '- "AUTOPAY CHASE CREDIT" -> Credit Card Payment\n'
         '- "starbucks #8901" -> Coffee\n'
-        '- "netflix.com" -> Subscriptions'
+        '- "netflix.com" -> Subscriptions\n'
+        '- "STATE OF UTAH PAYROLL" -> Income\n'
+        '- "AUTOMATIC DEPOSIT EMPLOYER" -> Income\n'
+        '- "UNKNOWN MERCHANT 12345" -> Uncategorized (not Groceries)'
     )
 
     url = f"{gateway_url}/{endpoint_name}/invocations"
@@ -602,9 +611,11 @@ def categorize_transactions(df: pl.DataFrame, use_ai: bool = False) -> pl.DataFr
     # Phase 5: AI enhancement for low-confidence items
     if use_ai:
         # Find low-confidence expense transactions (exclude Income/Transfers)
+        # Hard guard: amount must be negative — never send income (positive) to AI
         low_confidence = result_df.filter(
             (pl.col('confidence') < 0.7) &
-            (pl.col('type') == 'Expense')
+            (pl.col('type') == 'Expense') &
+            (pl.col('amount') < 0)
         )
 
         if len(low_confidence) > 0:
@@ -639,12 +650,13 @@ def categorize_transactions(df: pl.DataFrame, use_ai: bool = False) -> pl.DataFr
                 result_df = result_df.join(merchant_to_category, on='merchant', how='left')
 
                 # Update category and confidence for low-confidence items
+                # Hard guard: only update negative-amount (expense) transactions
                 result_df = result_df.with_columns([
-                    pl.when((pl.col('confidence') < 0.7) & (pl.col('type') == 'Expense') & pl.col('ai_category').is_not_null())
+                    pl.when((pl.col('confidence') < 0.7) & (pl.col('type') == 'Expense') & (pl.col('amount') < 0) & pl.col('ai_category').is_not_null())
                       .then(pl.col('ai_category'))
                       .otherwise(pl.col('category'))
                       .alias('category'),
-                    pl.when((pl.col('confidence') < 0.7) & (pl.col('type') == 'Expense') & pl.col('ai_category').is_not_null())
+                    pl.when((pl.col('confidence') < 0.7) & (pl.col('type') == 'Expense') & (pl.col('amount') < 0) & pl.col('ai_category').is_not_null())
                       .then(pl.lit(0.85))  # AI confidence score
                       .otherwise(pl.col('confidence'))
                       .alias('confidence')
