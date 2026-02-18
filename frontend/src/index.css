@@ -146,6 +146,17 @@ select {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+@keyframes bakeFall {
+  0%   { transform: translateY(0) rotate(0deg) scale(1); opacity: 1; }
+  80%  { opacity: 1; }
+  100% { transform: translateY(110vh) rotate(540deg) scale(0.7); opacity: 0; }
+}
+
+@keyframes fadeOut {
+  0%   { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 .error-banner {
   background: #FEF2F2;
   border: 1px solid #FECACA;
