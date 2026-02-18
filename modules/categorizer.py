@@ -488,21 +488,27 @@ def _call_serving_endpoint(gateway_url: str, token: str, endpoint_name: str, mer
         '- "netflix.com" -> Subscriptions'
     )
 
-    url = f"{gateway_url}/responses"
+    url = f"{gateway_url}/{endpoint_name}/invocations"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
     payload = {
-        "model": endpoint_name,
-        "instructions": SYSTEM_PROMPT,
-        "input": user_content,
-        "max_output_tokens": 4096,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "max_tokens": 4096,
+        "temperature": 0,
     }
 
     resp = _requests.post(url, headers=headers, json=payload, timeout=60)
 
-    raise ValueError(f"Gateway HTTP {resp.status_code} | body: {repr(resp.text[:800])}")
+    if not resp.ok:
+        raise ValueError(f"Model error {resp.status_code}: {resp.text[:500]}")
+
+    data = resp.json()
+    return data["choices"][0]["message"]["content"].strip()
 
 
 def categorize_with_ai(merchants: List[str]) -> Dict[str, str]:
