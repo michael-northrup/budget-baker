@@ -29,3 +29,12 @@ Thumbs.db
 *.pdf
 *.csv
 !test_data/*.csv
+
+# Frontend
+frontend/node_modules/
+
+# Databricks
+.databricks/
+.bundle/
+*.terraform.tfstate
+*.terraform.tfstate.backup

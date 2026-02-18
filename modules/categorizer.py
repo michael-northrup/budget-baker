@@ -3,11 +3,16 @@ Categorization Module - Two-tier categorization (keyword + optional AI)
 Using Polars for high-performance data processing
 """
 
+import os
 import re
+import logging
 from typing import Dict, Tuple, Optional, List
 import polars as pl
 import json
-from anthropic import Anthropic
+from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError, InternalServerError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+logger = logging.getLogger(__name__)
 
 
 # Category definitions with keyword rules
@@ -385,13 +390,134 @@ def categorize_by_keywords(description: str, amount: float) -> Tuple[str, float]
     return best_category, best_confidence
 
 
-def categorize_with_ai(merchants: List[str], api_key: str) -> Dict[str, str]:
+SYSTEM_PROMPT = """You are an expert at categorizing financial transactions. You will receive merchant names and must assign each to exactly one category.
+
+IMPORTANT CONTEXT:
+Many merchants appear through payment processors. Look past the processor to identify the actual business:
+- "SQ *" = Square (payment processor - look at what follows)
+- "TST*" = Toast (restaurant POS - usually dining)
+- "Nyx*" = Payment processor (look at business name/type)
+- "PAYPAL *" = PayPal (look at merchant after asterisk)
+- Numbers after merchant = location/transaction ID (ignore these)
+
+Valid Categories:
+
+Food & Drink:
+- Groceries: Supermarkets, grocery stores, food markets (Whole Foods, Trader Joe's, Safeway, etc.)
+- Dining/Restaurants: Sit-down restaurants, cafes, food delivery (NOT fast food)
+- Fast Food: Quick service, drive-thru (McDonald's, Taco Bell, Chipotle, etc.)
+- Coffee: Coffee shops, cafes (Starbucks, Dunkin, Peet's, etc.)
+- Alcohol/Bars: Bars, breweries, liquor stores, wine shops
+
+Transportation:
+- Gas/Transportation: Gas stations, EV charging (Shell, Chevron, Electrify America, ChargePoint, EVgo), rideshare, parking, tolls
+- Auto/Car Maintenance: Oil changes, repairs, car washes, auto parts
+- Airfare: Airlines, flights, airport services
+
+Shopping:
+- Shopping: General retail, department stores, online shopping
+- Clothing: Apparel, shoes, fashion retailers
+- Electronics: Tech stores, computers, phones, gaming
+- Furniture: Home furnishing, decor stores
+
+Home:
+- Rent/Mortgage: Housing payments, property management
+- Home Improvement: Hardware stores, building supplies, contractors
+- Bills/Utilities: Electric, water, internet, phone, cable, gas company
+
+Services:
+- Subscriptions: Streaming, software, memberships (Netflix, Spotify, Adobe)
+- Insurance: Auto, health, life, property insurance
+- Professional Services: Lawyers, accountants, consultants
+- Business Expenses: Office supplies, shipping, professional fees
+
+Personal:
+- Healthcare: Doctors, dentists, hospitals, clinics
+- Pharmacy: Prescriptions, drugstores, medications
+- Personal Care: Salon, barber, spa, beauty products
+- Fitness: Gyms, yoga studios, sports clubs, trainers
+- Entertainment: Movies, theaters, concerts, recreation
+
+Family:
+- Childcare: Daycare, babysitters, preschool
+- Education: Tuition, schools, courses, books, training
+- Pets: Pet supplies, veterinary, pet stores
+
+Travel:
+- Travel: Hotels, accommodations, vacation rentals
+- Hobbies: Craft stores, hobby supplies, sporting goods
+
+Financial:
+- Fees: Bank fees, late fees, service charges
+- Loans: Student loans, car loans, personal loans
+- Credit Card Payment: Payments to credit cards, autopay to cards
+- Taxes: Tax payments, IRS, state/federal tax
+- Checks: Check payments, written checks
+- ATM/Cash: ATM withdrawals, cash advances
+
+Other:
+- Gifts/Donations: Charitable donations, gifts, nonprofits, fundraising
+- Income: Salary, wages, refunds, reimbursements
+- Transfers: Between accounts, Venmo, Zelle, PayPal transfers
+- Uncategorized: Only if truly unclear
+
+Reasoning approach:
+1. Strip payment processor prefix (SQ*, TST*, Nyx*, PAYPAL*)
+2. Ignore trailing numbers/IDs
+3. Identify core business name
+4. Categorize based on business type
+5. Use context clues (ELECTRIFY = EV charging, TST = restaurants, etc.)
+
+Respond with ONLY a JSON object mapping each merchant to its category. No explanations or extra text."""
+
+
+# Retry on transient errors with exponential backoff: 1s, 2s, 4s
+@retry(
+    retry=retry_if_exception_type((APITimeoutError, APIConnectionError, RateLimitError, InternalServerError)),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def _call_serving_endpoint(client: OpenAI, endpoint_name: str, merchants: List[str]) -> str:
+    """Make a single API call to the serving endpoint with retry logic."""
+    user_content = (
+        "Categorize these merchants:\n"
+        f"{json.dumps(merchants)}\n\n"
+        "Examples:\n"
+        '- "SQ *CORNER BAKERY" -> Dining/Restaurants\n'
+        '- "TST* PIZZA PLACE" -> Dining/Restaurants\n'
+        '- "Nyx*8336322778 ELECTRIFY" -> Gas/Transportation\n'
+        '- "wholefds slu 10281" -> Groceries\n'
+        '- "shell oil 57432658901" -> Gas/Transportation\n'
+        '- "AUTOPAY CHASE CREDIT" -> Credit Card Payment\n'
+        '- "starbucks #8901" -> Coffee\n'
+        '- "netflix.com" -> Subscriptions'
+    )
+
+    response = client.chat.completions.create(
+        model=endpoint_name,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=0,
+        max_tokens=4096,
+        response_format={"type": "json_object"},
+    )
+
+    return response.choices[0].message.content.strip()
+
+
+def categorize_with_ai(merchants: List[str]) -> Dict[str, str]:
     """
-    Use Claude API to categorize merchants that keyword matching missed
+    Use Databricks-hosted model to categorize merchants that keyword matching missed.
+
+    Uses DatabricksOpenAI client which automatically picks up credentials
+    from the Databricks App service principal (DATABRICKS_CLIENT_ID /
+    DATABRICKS_CLIENT_SECRET injected by the platform).
 
     Args:
         merchants: List of normalized merchant names
-        api_key: Anthropic API key
 
     Returns:
         Dictionary mapping merchant -> category
@@ -402,124 +528,14 @@ def categorize_with_ai(merchants: List[str], api_key: str) -> Dict[str, str]:
     # Get list of all valid categories
     valid_categories = list(CATEGORIES.keys()) + ['Income', 'Transfers', 'Uncategorized']
 
-    # Create prompt for AI categorization
-    prompt = f"""You are an expert at categorizing financial transactions. Analyze merchant names and assign them to the most appropriate category.
-
-**IMPORTANT CONTEXT:**
-Many merchants appear through payment processors. Look past the processor to identify the actual business:
-- "SQ *" = Square (payment processor - look at what follows)
-- "TST*" = Toast (restaurant POS - usually dining)
-- "Nyx*" = Payment processor (look at business name/type)
-- "PAYPAL *" = PayPal (look at merchant after asterisk)
-- Numbers after merchant = location/transaction ID (ignore these)
-
-**Valid Categories:**
-
-**Food & Drink:**
-- Groceries: Supermarkets, grocery stores, food markets (Whole Foods, Trader Joe's, Safeway, etc.)
-- Dining/Restaurants: Sit-down restaurants, cafes, food delivery (NOT fast food)
-- Fast Food: Quick service, drive-thru (McDonald's, Taco Bell, Chipotle, etc.)
-- Coffee: Coffee shops, cafes (Starbucks, Dunkin, Peet's, etc.)
-- Alcohol/Bars: Bars, breweries, liquor stores, wine shops
-
-**Transportation:**
-- Gas/Transportation: Gas stations, EV charging (Shell, Chevron, Electrify America, ChargePoint, EVgo), rideshare, parking, tolls
-- Auto/Car Maintenance: Oil changes, repairs, car washes, auto parts
-- Airfare: Airlines, flights, airport services
-
-**Shopping:**
-- Shopping: General retail, department stores, online shopping
-- Clothing: Apparel, shoes, fashion retailers
-- Electronics: Tech stores, computers, phones, gaming
-- Furniture: Home furnishing, decor stores
-
-**Home:**
-- Rent/Mortgage: Housing payments, property management
-- Home Improvement: Hardware stores, building supplies, contractors
-- Bills/Utilities: Electric, water, internet, phone, cable, gas company
-
-**Services:**
-- Subscriptions: Streaming, software, memberships (Netflix, Spotify, Adobe)
-- Insurance: Auto, health, life, property insurance
-- Professional Services: Lawyers, accountants, consultants
-- Business Expenses: Office supplies, shipping, professional fees
-
-**Personal:**
-- Healthcare: Doctors, dentists, hospitals, clinics
-- Pharmacy: Prescriptions, drugstores, medications
-- Personal Care: Salon, barber, spa, beauty products
-- Fitness: Gyms, yoga studios, sports clubs, trainers
-- Entertainment: Movies, theaters, concerts, recreation
-
-**Family:**
-- Childcare: Daycare, babysitters, preschool
-- Education: Tuition, schools, courses, books, training
-- Pets: Pet supplies, veterinary, pet stores
-
-**Travel:**
-- Travel: Hotels, accommodations, vacation rentals
-- Hobbies: Craft stores, hobby supplies, sporting goods
-
-**Financial:**
-- Fees: Bank fees, late fees, service charges
-- Loans: Student loans, car loans, personal loans
-- Credit Card Payment: Payments to credit cards, autopay to cards
-- Taxes: Tax payments, IRS, state/federal tax
-- Checks: Check payments, written checks
-- ATM/Cash: ATM withdrawals, cash advances
-
-**Other:**
-- Gifts/Donations: Charitable donations, gifts, nonprofits, fundraising
-- Income: Salary, wages, refunds, reimbursements
-- Transfers: Between accounts, Venmo, Zelle, PayPal transfers
-- Uncategorized: Only if truly unclear
-
-**Examples showing payment processor patterns:**
-- "SQ *CORNER BAKERY" -> Dining/Restaurants (Square processor, bakery/cafe)
-- "TST* PIZZA PLACE" -> Dining/Restaurants (Toast = restaurant POS)
-- "Nyx*8336322778 ELECTRIFY" -> Gas/Transportation (EV charging station)
-- "PAYPAL *CRAFTSHOP" -> Shopping (PayPal payment to craft shop)
-- "wholefds slu 10281" -> Groceries (numbers are location ID)
-- "shell oil 57432658901" -> Gas/Transportation (numbers are pump/location)
-- "AUTOPAY CHASE CREDIT" -> Credit Card Payment
-- "starbucks #8901" -> Coffee (location number)
-- "netflix.com" -> Subscriptions
-- "ACME CORP PAYROLL" -> Income
-
-**Reasoning approach:**
-1. Strip payment processor prefix (SQ*, TST*, Nyx*, PAYPAL*)
-2. Ignore trailing numbers/IDs
-3. Identify core business name
-4. Categorize based on business type
-5. Use context clues (ELECTRIFY = EV charging, TST = restaurants, etc.)
-
-Return ONLY a JSON object mapping each merchant to its category. No explanations or extra text.
-
-Format: {{"merchant1": "Category", "merchant2": "Category"}}
-
-**Merchants to categorize:**
-{json.dumps(merchants)}"""
-
     try:
-        client = Anthropic(api_key=api_key)
+        endpoint_name = os.environ["DATABRICKS_ENDPOINT_NAME"]
+        gateway_url = os.environ["DATABRICKS_GATEWAY_URL"]
+        token = os.environ["DATABRICKS_TOKEN"]
 
-        response = client.messages.create(
-            model="claude-3-5-haiku-20241022",
-            max_tokens=2048,
-            messages=[{
-                "role": "user",
-                "content": prompt
-            }]
-        )
+        client = OpenAI(api_key=token, base_url=gateway_url)
 
-        # Parse JSON response
-        response_text = response.content[0].text.strip()
-
-        # Extract JSON from response (handles markdown code blocks)
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in response_text:
-            response_text = response_text.split("```")[1].split("```")[0].strip()
+        response_text = _call_serving_endpoint(client, endpoint_name, merchants)
 
         categorization = json.loads(response_text)
 
@@ -529,16 +545,24 @@ Format: {{"merchant1": "Category", "merchant2": "Category"}}
             if category in valid_categories:
                 validated[merchant] = category
             else:
+                logger.warning(f"AI returned invalid category '{category}' for '{merchant}', defaulting to Uncategorized")
                 validated[merchant] = 'Uncategorized'
 
         return validated
 
+    except (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError) as e:
+        # Transient errors that exhausted retries
+        logger.error(f"AI categorization failed after retries: {e}")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"AI returned invalid JSON: {e}")
+        return {}
     except Exception as e:
-        print(f"AI categorization error: {e}")
+        logger.error(f"AI categorization error: {e}")
         return {}
 
 
-def categorize_transactions(df: pl.DataFrame, use_ai: bool = False, api_key: Optional[str] = None) -> pl.DataFrame:
+def categorize_transactions(df: pl.DataFrame, use_ai: bool = False) -> pl.DataFrame:
     """
     Categorize all transactions in the Polars DataFrame
 
@@ -548,7 +572,6 @@ def categorize_transactions(df: pl.DataFrame, use_ai: bool = False, api_key: Opt
     Args:
         df: Polars DataFrame with columns [date, description, amount, check_number, original_category]
         use_ai: Whether to use AI for low-confidence items
-        api_key: Anthropic API key (optional)
 
     Returns:
         Polars DataFrame with added columns [category, confidence, type]
@@ -574,7 +597,7 @@ def categorize_transactions(df: pl.DataFrame, use_ai: bool = False, api_key: Opt
     ])
 
     # Phase 5: AI enhancement for low-confidence items
-    if use_ai and api_key:
+    if use_ai:
         # Find low-confidence expense transactions (exclude Income/Transfers)
         low_confidence = result_df.filter(
             (pl.col('confidence') < 0.7) &
@@ -593,7 +616,7 @@ def categorize_transactions(df: pl.DataFrame, use_ai: bool = False, api_key: Opt
 
             for i in range(0, len(unique_merchants), batch_size):
                 batch = unique_merchants[i:i+batch_size]
-                batch_results = categorize_with_ai(batch, api_key)
+                batch_results = categorize_with_ai(batch)
                 all_categorizations.update(batch_results)
 
             # Apply AI categorizations back to the dataframe

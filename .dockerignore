@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Git
+.git/
+.gitignore
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+tests/
+test_data/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Old Streamlit files (not needed in Docker)
+.streamlit/
+pages/
+app.py
+
+# Frontend source — only the built dist/ is needed
+frontend/node_modules/
+frontend/src/
+frontend/public/
+frontend/index.html
+frontend/vite.config.ts
+frontend/tsconfig*.json
+frontend/package*.json
+
+# Build artifacts
+*.egg-info/
+build/
+
+# Logs
+*.log

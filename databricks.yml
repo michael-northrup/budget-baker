@@ -1,0 +1,69 @@
+# Databricks Asset Bundle Configuration
+bundle:
+  name: budget-baker
+
+# App resources
+resources:
+  apps:
+    budget_baker_app:
+      name: budget-baker-${bundle.target}
+      description: "Budget Baker - FastAPI + React App"
+      source_code_path: .
+      permissions:
+        - level: CAN_USE
+          group_name: users
+      resources:
+        - name: databricks-gateway-url
+          description: "AI Gateway base URL"
+          secret:
+            scope: budget-baker
+            key: databricks-gateway-url
+            permission: READ
+        - name: databricks-token
+          description: "Databricks PAT for AI Gateway auth"
+          secret:
+            scope: budget-baker
+            key: databricks-token
+            permission: READ
+        - name: databricks-endpoint-name
+          description: "AI Gateway model/route name"
+          secret:
+            scope: budget-baker
+            key: databricks-endpoint-name
+            permission: READ
+
+# Deployment targets (dev, staging, prod)
+targets:
+  # Development target
+  dev:
+    mode: development
+    default: true
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    resources:
+      apps:
+        budget_baker_app:
+          name: budget-baker-dev
+          description: "Budget Baker - FastAPI + React (Development)"
+
+  # Staging target
+  staging:
+    mode: development
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    resources:
+      apps:
+        budget_baker_app:
+          name: budget-baker-staging
+          description: "Budget Baker - FastAPI + React (Staging)"
+
+  # Production target
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    resources:
+      apps:
+        budget_baker_app:
+          name: budget-baker-prod
+          description: "Budget Baker - FastAPI + React (Production)"
