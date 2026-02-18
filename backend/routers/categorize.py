@@ -50,4 +50,4 @@ async def categorize(request: CategorizeRequest):
 @router.get("/categories")
 async def get_categories():
     """Return the list of valid category names."""
-    return {"categories": list(CATEGORIES.keys())}
+    return {"categories": list(CATEGORIES.keys()) + ['Income', 'Transfers', 'Uncategorized']}
