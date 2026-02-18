@@ -311,14 +311,19 @@ CATEGORIES = {
 
 # Income and Transfer patterns (not expense categories)
 INCOME_KEYWORDS = [
-    'payroll', 'salary', 'direct deposit', 'deposit.*salary',
+    'payroll', 'payro',  # handle truncated descriptions
+    'salary', 'direct deposit', 'deposit.*salary',
     'income', 'payment received', 'refund', 'reimbursement',
-    'dividend', 'interest payment', 'bonus', 'commission'
+    'dividend', 'interest payment', 'bonus', 'commission',
+    'state.*payro', 'federal.*payro', 'employer.*dep', 'direct dep',
+    'irs.*refund', 'tax refund', 'soc.*sec', 'social security',
+    'pension', 'retirement.*dist', 'annuity',
+    'unemployment', 'benefit.*payment', 'govt.*payment',
 ]
 
 TRANSFER_KEYWORDS = [
     'transfer to savings', 'transfer from savings', 'transfer to checking', 'transfer from checking',
-    'xfer', 'zelle', 'venmo.*transfer', 'cashapp.*transfer',
+    'xfer', 'zelle', 'venmo', 'cashapp', 'cash app', 'paypal',
     'online transfer', 'mobile deposit', 'check deposit',
     'ach transfer', 'internal transfer', 'external transfer',
     'savings transfer', 'wire transfer', 'account transfer',
@@ -335,7 +340,7 @@ def normalize_merchant(description: str) -> str:
     merchant = description.lower()
 
     # Remove common prefixes
-    merchant = re.sub(r'^(purchase,?|automatic withdrawal,?|payment,?|debit,?)\s*', '', merchant)
+    merchant = re.sub(r'^(purchase,?|automatic withdrawal,?|automatic deposit,?|payment,?|debit,?)\s*', '', merchant)
 
     # Remove trailing numbers and special characters
     merchant = re.sub(r'[#\*]\d+.*$', '', merchant)
@@ -356,12 +361,14 @@ def categorize_by_keywords(description: str, amount: float) -> Tuple[str, float]
     """
     merchant = normalize_merchant(description)
 
-    # Check if it's income
+    # Check if it's income — positive amounts are always income
+    # Use 0.8 default (well above AI threshold of 0.7) so positive-amount
+    # transactions never leak to the AI categorizer
     if amount > 0:
         for keyword in INCOME_KEYWORDS:
             if re.search(keyword, merchant):
                 return 'Income', 0.95
-        return 'Income', 0.7  # Default for positive amounts
+        return 'Income', 0.8  # Default for positive amounts
 
     # Check if it's a transfer
     for keyword in TRANSFER_KEYWORDS:
