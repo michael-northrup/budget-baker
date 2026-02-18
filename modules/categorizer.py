@@ -494,17 +494,14 @@ def _call_serving_endpoint(client: OpenAI, endpoint_name: str, merchants: List[s
         '- "netflix.com" -> Subscriptions'
     )
 
-    response = client.chat.completions.create(
+    response = client.responses.create(
         model=endpoint_name,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0,
-        max_tokens=4096,
+        instructions=SYSTEM_PROMPT,
+        input=user_content,
+        max_output_tokens=4096,
     )
 
-    return response.choices[0].message.content.strip()
+    return response.output_text.strip()
 
 
 def categorize_with_ai(merchants: List[str]) -> Dict[str, str]:
