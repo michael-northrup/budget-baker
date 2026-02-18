@@ -502,7 +502,6 @@ def _call_serving_endpoint(client: OpenAI, endpoint_name: str, merchants: List[s
         ],
         temperature=0,
         max_tokens=4096,
-        response_format={"type": "json_object"},
     )
 
     return response.choices[0].message.content.strip()
@@ -551,15 +550,14 @@ def categorize_with_ai(merchants: List[str]) -> Dict[str, str]:
         return validated
 
     except (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError) as e:
-        # Transient errors that exhausted retries
         logger.error(f"AI categorization failed after retries: {e}")
-        return {}
+        raise
     except json.JSONDecodeError as e:
         logger.error(f"AI returned invalid JSON: {e}")
-        return {}
+        raise
     except Exception as e:
         logger.error(f"AI categorization error: {e}")
-        return {}
+        raise
 
 
 def categorize_transactions(df: pl.DataFrame, use_ai: bool = False) -> pl.DataFrame:
