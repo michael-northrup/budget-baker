@@ -9,8 +9,6 @@ import logging
 from typing import Dict, Tuple, Optional, List
 import polars as pl
 import json
-from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError, InternalServerError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
 
@@ -472,14 +470,10 @@ Respond with ONLY a JSON object mapping each merchant to its category. No explan
 
 
 # Retry on transient errors with exponential backoff: 1s, 2s, 4s
-@retry(
-    retry=retry_if_exception_type((APITimeoutError, APIConnectionError, RateLimitError, InternalServerError)),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    stop=stop_after_attempt(3),
-    reraise=True,
-)
-def _call_serving_endpoint(client: OpenAI, endpoint_name: str, merchants: List[str]) -> str:
-    """Make a single API call to the serving endpoint with retry logic."""
+def _call_serving_endpoint(gateway_url: str, token: str, endpoint_name: str, merchants: List[str]) -> str:
+    """Make a single API call to the serving endpoint."""
+    import requests as _requests
+
     user_content = (
         "Categorize these merchants:\n"
         f"{json.dumps(merchants)}\n\n"
@@ -494,14 +488,31 @@ def _call_serving_endpoint(client: OpenAI, endpoint_name: str, merchants: List[s
         '- "netflix.com" -> Subscriptions'
     )
 
-    response = client.responses.create(
-        model=endpoint_name,
-        instructions=SYSTEM_PROMPT,
-        input=user_content,
-        max_output_tokens=4096,
-    )
+    url = f"{gateway_url}/responses"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": endpoint_name,
+        "instructions": SYSTEM_PROMPT,
+        "input": user_content,
+        "max_output_tokens": 4096,
+    }
 
-    return response.output_text.strip()
+    resp = _requests.post(url, headers=headers, json=payload, timeout=60)
+
+    if not resp.ok:
+        raise ValueError(f"Gateway error {resp.status_code}: {resp.text[:500]}")
+
+    data = resp.json()
+    logger.debug(f"Gateway response keys: {list(data.keys())}")
+
+    # Extract text from Responses API format
+    try:
+        return data["output"][0]["content"][0]["text"]
+    except (KeyError, IndexError):
+        raise ValueError(f"Unexpected response structure: {str(data)[:500]}")
 
 
 def categorize_with_ai(merchants: List[str]) -> Dict[str, str]:
@@ -529,9 +540,7 @@ def categorize_with_ai(merchants: List[str]) -> Dict[str, str]:
         gateway_url = os.environ["DATABRICKS_GATEWAY_URL"]
         token = os.environ["DATABRICKS_TOKEN"]
 
-        client = OpenAI(api_key=token, base_url=gateway_url)
-
-        response_text = _call_serving_endpoint(client, endpoint_name, merchants)
+        response_text = _call_serving_endpoint(gateway_url, token, endpoint_name, merchants)
 
         categorization = json.loads(response_text)
 
@@ -546,9 +555,6 @@ def categorize_with_ai(merchants: List[str]) -> Dict[str, str]:
 
         return validated
 
-    except (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError) as e:
-        logger.error(f"AI categorization failed after retries: {e}")
-        raise
     except json.JSONDecodeError as e:
         logger.error(f"AI returned invalid JSON: {e}")
         raise
